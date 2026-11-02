@@ -537,6 +537,21 @@ export default class I3Extras extends Extension {
         this._layoutRight();
         Main.panel._centerBox.add_child(this._title);
 
+        // Main bar: the same gear as the secondary bars, in place of the
+        // wifi / bluetooth / sound / battery icons. GNOME's panel button
+        // draws only its first child, so the gear goes first and the
+        // indicators box is hidden; the menu still opens from this button.
+        const qsBtn = Main.panel.statusArea.quickSettings;
+        if (qsBtn?._indicators) {
+            this._gear = new St.BoxLayout({style_class: 'panel-status-indicators-box'});
+            this._gear.add_child(new St.Icon({
+                icon_name: 'emblem-system-symbolic',
+                style_class: 'system-status-icon',
+            }));
+            qsBtn.insert_child_at_index(this._gear, 0);
+            qsBtn._indicators.hide();
+        }
+
         // A bar on every other monitor; rebuilt when monitors change.
         this._bars = [];
         this._buildBars = () => {
@@ -581,6 +596,11 @@ export default class I3Extras extends Extension {
             this._dateHome.add_child(this._dateBox);
         }
         this._dateBox = this._dateHome = null;
+        if (this._gear) {
+            this._gear.destroy();
+            this._gear = null;
+            Main.panel.statusArea.quickSettings?._indicators?.show();
+        }
         this._activities?.show();
         this._activities = null;
         this._injections.clear();
