@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=greenclip (GNOME)
+Comment=Clipboard history daemon for Super+Shift+V; i3 starts it on its own
+Exec=/home/spellsharp/.local/bin/greenclip daemon
+OnlyShowIn=GNOME;
+X-GNOME-Autostart-enabled=true

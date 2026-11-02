@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=i3 Mode
+Comment=Turn the i3-style GNOME setup on or off
+Exec=sh -c "$HOME/.local/bin/gnome-i3 toggle"
+Icon=preferences-desktop-keyboard-shortcuts
+Terminal=false
+Categories=Settings;

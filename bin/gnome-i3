@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+# gnome-i3: turn the i3-style GNOME setup on or off.
+#   gnome-i3 on | off | toggle | status
+# On:  Forge tiling + i3-extras extension (per-monitor workspaces, bar),
+#      i3 key bindings, clipboard daemon.
+# Off: plain GNOME (tiling-assistant, GNOME keys). Super+L locks with
+#      i3lock, because GNOME's own lock fails under LightDM.
+# Not touched: lock daemon, VPN tray, display-auto-v2 (machine fixes).
+# Every run first saves a full dconf dump in ~/.local/state/gnome-i3/.
+set -euo pipefail
+
+R="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+EXT="$HOME/.local/share/gnome-shell/extensions"
+FORGE="$EXT/forge@jmmaranan.com"
+I3X="i3-extras@spellsharp"
+STATE="$HOME/.local/state/gnome-i3"
+MK=org.gnome.settings-daemon.plugins.media-keys
+KB=/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings
+LOCK_PATH="$KB/gnome-i3-lock/"
+
+mkdir -p "$STATE"
+
+say() { echo "gnome-i3: $*"; }
+
+snapshot() {
+    dconf dump / > "$STATE/dconf-before-$1-$(date +%Y%m%d_%H%M%S).ini"
+}
+
+mode() {
+    cat "$STATE/mode" 2>/dev/null || echo unknown
+}
+
+# Forge has two local fixes (see forge-patches/). A Forge update removes
+# them, so check on every "on".
+patch_forge() {
+    local f="$FORGE/lib/extension/tree.js"
+    if [ ! -f "$f" ]; then
+        say "WARNING: Forge is not installed at $FORGE"
+        return
+    fi
+    if grep -q "Local patch (spellsharp)" "$f"; then
+        return
+    fi
+    if patch -d "$FORGE" -p1 --forward --dry-run -s < "$R/forge-patches/forge-local.patch" >/dev/null; then
+        cp "$f" "$f.bak.prepatch.$(date +%Y%m%d_%H%M%S)"
+        patch -d "$FORGE" -p1 --forward -s < "$R/forge-patches/forge-local.patch"
+        say "Forge patches applied again (Forge was updated). Restart GNOME Shell: Alt+F2, r, Enter."
+    else
+        say "WARNING: Forge patches do not apply to this Forge version. Portrait split and monitor moves may be wrong."
+    fi
+}
+
+ext_on() {
+    gnome-extensions enable "$1" 2>/dev/null || say "WARNING: cannot enable $1 (restart GNOME Shell, then run again)"
+}
+
+ext_off() {
+    gnome-extensions disable "$1" 2>/dev/null || true
+}
+
+lock_key_on() {
+    # Plain GNOME: Super+L runs the working lock (i3lock).
+    gsettings set "$MK" screensaver "[]"
+    local s="$MK.custom-keybinding:$LOCK_PATH"
+    gsettings set "$s" name "Lock (i3lock)"
+    gsettings set "$s" binding "<Super>l"
+    gsettings set "$s" command "$HOME/.config/scripts/lock-v4"
+    local cur
+    cur=$(gsettings get "$MK" custom-keybindings)
+    case "$cur" in
+        *"$LOCK_PATH"*) ;;
+        "@as []"|"[]") gsettings set "$MK" custom-keybindings "['$LOCK_PATH']" ;;
+        *) gsettings set "$MK" custom-keybindings "${cur%]}, '$LOCK_PATH']" ;;
+    esac
+}
+
+lock_key_off() {
+    dconf reset -f "$LOCK_PATH"
+}
+
+do_on() {
+    snapshot on
+    if [ ! -e "$EXT/$I3X" ]; then
+        say "ERROR: $EXT/$I3X is missing (it links to $R/extension/$I3X)"
+        exit 1
+    fi
+    patch_forge
+    lock_key_off
+    bash "$R/keys/apply-i3-keys.sh"
+    bash "$R/keys/apply-forge.sh"
+    ln -sf "$R/autostart/greenclip-gnome.desktop" "$HOME/.config/autostart/greenclip-gnome.desktop"
+    pgrep -x greenclip >/dev/null || (setsid "$HOME/.local/bin/greenclip" daemon >/dev/null 2>&1 &)
+    ext_on forge@jmmaranan.com
+    ext_on "$I3X"
+    echo on > "$STATE/mode"
+    say "ON. i3 keys, Forge tiling and per-monitor workspaces are active."
+}
+
+do_off() {
+    snapshot off
+    # The extension first: on disable it puts every window back on a normal
+    # workspace and restores the old workspace settings.
+    ext_off "$I3X"
+    bash "$R/keys/undo-forge.sh"
+    bash "$R/keys/undo-i3-keys.sh"
+    lock_key_on
+    echo off > "$STATE/mode"
+    say "OFF. Plain GNOME. Super+L locks the screen."
+}
+
+status() {
+    echo "mode:        $(mode)"
+    for e in "$I3X" forge@jmmaranan.com tiling-assistant@ubuntu.com; do
+        printf '%-28s %s\n' "$e:" "$(gnome-extensions info "$e" 2>/dev/null | awk -F': ' '/State/ {print $2}')"
+    done
+    if grep -q "Local patch (spellsharp)" "$FORGE/lib/extension/tree.js" 2>/dev/null; then
+        echo "forge patch: present"
+    else
+        echo "forge patch: MISSING (gnome-i3 on applies it)"
+    fi
+    echo "extension:   $(readlink -f "$EXT/$I3X")"
+}
+
+notify() {
+    command -v notify-send >/dev/null && notify-send -a "i3 Mode" "i3 Mode" "$1" || true
+}
+
+case "${1:-status}" in
+    on) do_on ;;
+    off) do_off ;;
+    toggle)
+        if [ "$(mode)" = on ]; then
+            do_off; notify "Off: plain GNOME"
+        else
+            do_on; notify "On: i3 keys and tiling"
+        fi ;;
+    status) status ;;
+    *) echo "usage: gnome-i3 on|off|toggle|status" >&2; exit 2 ;;
+esac

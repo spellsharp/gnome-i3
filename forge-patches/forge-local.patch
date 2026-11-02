@@ -1,0 +1,37 @@
+--- a/lib/extension/tree.js	2026-11-02 15:29:34.957438441 +0530
++++ b/lib/extension/tree.js	2026-11-02 15:29:34.959265969 +0530
+@@ -648,7 +648,11 @@
+         NODE_TYPES.MONITOR,
+         `mo${mi}ws${wsIndex}`
+       );
+-      monitorWsNode.layout = this.extWm.determineSplitLayout();
++      // Local patch (spellsharp): use monitor mi's shape, not the monitor
++      // under the pointer, so a portrait monitor gets VSPLIT.
++      const moRect = global.display.get_monitor_geometry(mi);
++      monitorWsNode.layout =
++        moRect.width < moRect.height ? LAYOUT_TYPES.VSPLIT : LAYOUT_TYPES.HSPLIT;
+       monitorWsNode.actorBin = new St.Bin();
+       if (!global.window_group.contains(monitorWsNode.actorBin))
+         global.window_group.add_child(monitorWsNode.actorBin);
+@@ -893,7 +897,9 @@
+     if (!next || next === -1) {
+       if (next === -1) {
+         // TODO - update appending or prepending on the same monitor
+-        const currMonWsNode = this.extWm.currentMonWsNode;
++        // Local patch (spellsharp): the window's own monitor, not the one
++        // under the pointer, or a second move jumps back to the pointer.
++        const currMonWsNode = this.findAncestorMonitor(node) ?? this.extWm.currentMonWsNode;
+         if (currMonWsNode) {
+           if (position === POSITION.AFTER) {
+             currMonWsNode.appendChild(node);
+@@ -946,7 +952,9 @@
+         break;
+       case NODE_TYPES.MONITOR:
+         parentTarget = next;
+-        const currMonWsNode = this.extWm.currentMonWsNode;
++        // Local patch (spellsharp): the window's own monitor, not the one
++        // under the pointer, or a second move jumps back to the pointer.
++        const currMonWsNode = this.findAncestorMonitor(node) ?? this.extWm.currentMonWsNode;
+ 
+         if (
+           !next.contains(node) &&

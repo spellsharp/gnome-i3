@@ -1,0 +1,110 @@
+/* Fully transparent top bar, like the old polybar (#001b1e24). */
+#panel {
+    background-color: transparent;
+    /* Same font as the old polybar (Inter Medium 11). */
+    font-family: "Inter";
+    font-size: 11pt;
+    font-weight: 500;
+}
+
+/* Keep panel text readable on bright wallpapers. Yaru sets bold on every
+   panel button, which beats #panel; polybar used Inter Medium (font-0). */
+#panel .panel-button,
+#panel .panel-button .clock {
+    font-family: "Inter";
+    font-size: 11pt;
+    font-weight: 500;
+    color: #f3f5f9;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+}
+
+/* Workspace numbers, styled after the polybar i3 module (height 32,
+   line-size 2, label padding 2, Inter Medium 11): full-height square
+   cells, focused = 20% white + 2px line along the bottom. */
+#panel .panel-button.i3x-ws-panel,
+#panel .panel-button.i3x-ws-panel:hover,
+#panel .panel-button.i3x-ws-panel:active {
+    padding: 0;
+    margin: 0;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+    background-color: transparent;
+    -natural-hpadding: 0;
+    -minimum-hpadding: 0;
+}
+
+.i3x-ws-box {
+    spacing: 0;
+}
+
+.i3x-ws-btn {
+    padding: 0 9px;
+    border-radius: 0;
+    border-bottom: 2px solid transparent;
+    font-family: "Inter";
+    font-size: 11pt;
+    font-weight: 500;
+    color: #e6ebf3;
+}
+
+.i3x-ws-btn:hover {
+    background-color: rgba(255, 255, 255, 0.10);
+}
+
+.i3x-ws-btn.active {
+    background-color: rgba(255, 255, 255, 0.20);
+    border-bottom-color: #d7dbe2;
+    color: #ffffff;
+}
+
+.i3x-ws-btn.urgent {
+    color: #ff7b72;
+}
+
+.i3x-glyph {
+    font-family: "FiraCode Nerd Font Mono";
+    font-size: 16px;
+}
+
+/* Window title (polybar title module: font-2 = Inter Semibold). */
+.i3x-title {
+    font-weight: 600;
+    color: #f3f5f9;
+}
+
+.i3x-title.empty {
+    color: #e6ebf3;
+}
+
+/* Text modules (now playing, keyboard layout) and separators. */
+.i3x-text {
+    color: #e6ebf3;
+}
+
+.i3x-sep {
+    color: #e6ebf3;
+    padding: 0 4px;
+}
+
+.i3x-apple .i3x-glyph {
+    font-family: "Inter";
+    font-size: 13pt;
+}
+
+/* Even spacing between every bar item (GNOME shrinks buttons to their
+   minimum padding when the bar is full, which made it look crowded). */
+#panel .panel-button {
+    -natural-hpadding: 10px;
+    -minimum-hpadding: 8px;
+}
+
+.i3x-module .panel-status-indicators-box {
+    spacing: 5px;
+}
+
+/* Workspace shown on a monitor that does not have focus (i3 "visible"). */
+.i3x-ws-btn.visible {
+    background-color: rgba(255, 255, 255, 0.08);
+    border-bottom-color: #6b7280;
+}

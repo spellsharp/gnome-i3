@@ -1,0 +1,6 @@
+{
+  "uuid": "i3-extras@spellsharp",
+  "name": "i3 Extras",
+  "description": "Numbered workspaces (only used ones), VPN and Caffeine buttons from the old polybar, a see-through top bar, no workspace switch popup, and instant workspace switching.",
+  "shell-version": ["46"]
+}
