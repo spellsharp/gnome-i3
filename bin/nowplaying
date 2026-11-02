@@ -1,6 +1,6 @@
 #!/bin/sh
 # Now Playing label for the top bar (click = play/pause)
-P="$P"
+P="$HOME/.local/bin/playerctl"
 [ -x "$P" ] || P=playerctl
 status=$("$P" status 2>/dev/null)
 case "$status" in
