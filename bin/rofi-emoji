@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Emoji picker (macOS Cmd+Ctrl+Space equivalent), bound to $mod+period.
+#
+# No package needed: rofi-emoji is not in the Ubuntu repos, so the data file is
+# generated locally from Python's unicodedata (see the regenerate note below).
+# Search is by Unicode name -- typing "smil", "rocket" or "fire" works.
+#
+# Picking an emoji does BOTH: puts it on the clipboard and types it into the
+# focused window. Typing alone fails in apps that ignore synthetic key events
+# (some Electron and Java windows); clipboard alone would mean an extra paste
+# everywhere else. Doing both means it always lands somewhere useful.
+#
+# Regenerate the data file after a Python/Unicode upgrade:
+#   python3 - <<'EOF'
+#   import unicodedata
+#   RANGES=[(0x1F300,0x1F5FF),(0x1F600,0x1F64F),(0x1F680,0x1F6FF),
+#           (0x1F900,0x1F9FF),(0x1FA70,0x1FAFF),(0x2600,0x26FF),(0x2700,0x27BF)]
+#   out=[]
+#   for lo,hi in RANGES:
+#       for cp in range(lo,hi+1):
+#           ch=chr(cp)
+#           try: n=unicodedata.name(ch)
+#           except ValueError: continue
+#           if n.startswith(("VARIATION","TAG ","REGIONAL")): continue
+#           if unicodedata.category(ch) not in ("So","Sk","Sm"): continue
+#           out.append(f"{ch} {n.title()}")
+#   open("$HOME/.local/share/emoji.txt","w").write("\n".join(out)+"\n")
+#   EOF
+DATA="$HOME/.local/share/emoji.txt"
+THEME="$HOME/.config/rofi/macspotlight.rasi"
+
+[ -s "$DATA" ] || { notify-send "Emoji picker" "Missing $DATA"; exit 1; }
+
+choice=$(rofi -dmenu -i -p "Emoji" -theme "$THEME" -theme-str 'entry { placeholder: "Search emoji"; }' < "$DATA") || exit 0
+[ -n "$choice" ] || exit 0
+
+emoji=${choice%% *}
+printf '%s' "$emoji" | xclip -selection clipboard
+
+# Small settle before typing: rofi's window is still going away, and xdotool
+# would otherwise deliver the keystroke to a window that is being unmapped.
+sleep 0.15
+xdotool type --clearmodifiers -- "$emoji" 2>/dev/null

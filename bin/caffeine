@@ -1,0 +1,80 @@
+#!/bin/sh
+# Top-bar keep-awake toggle. It controls display power management and blocks
+# idle sleep, explicit sleep requests, and systemd-logind lid-close handling.
+FLAG="$HOME/.cache/caffeine-on"
+INHIBIT_PID="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/caffeine-inhibit.pid"
+
+screen_active() {
+  xset q 2>/dev/null | grep -q 'DPMS is Disabled'
+}
+
+inhibit_active() {
+  [ -r "$INHIBIT_PID" ] || return 1
+  pid=$(cat "$INHIBIT_PID")
+  case "$pid" in *[!0-9]*|'') return 1 ;; esac
+  [ -r "/proc/$pid/cmdline" ] || return 1
+  tr '\000' ' ' < "/proc/$pid/cmdline" 2>/dev/null |
+    grep -q 'systemd-inhibit.*Top-bar Caffeine'
+}
+
+active() {
+  screen_active && inhibit_active
+}
+
+start_inhibitor() {
+  inhibit_active && return 0
+  rm -f "$INHIBIT_PID"
+  systemd-inhibit \
+    --what=handle-lid-switch:sleep:idle \
+    --who='Top-bar Caffeine' \
+    --why='Keep processes and networking active while the lid is closed' \
+    --mode=block sleep infinity >/dev/null 2>&1 &
+  echo $! > "$INHIBIT_PID"
+  sleep 0.1
+  inhibit_active
+}
+
+stop_inhibitor() {
+  if inhibit_active; then
+    kill "$(cat "$INHIBIT_PID")"
+  fi
+  rm -f "$INHIBIT_PID"
+}
+
+on() {
+  xset s off -dpms
+  if start_inhibitor; then
+    touch "$FLAG"
+  else
+    xset s on +dpms
+    return 1
+  fi
+}
+
+off() {
+  stop_inhibitor
+  xset s on +dpms
+  rm -f "$FLAG"
+}
+
+case "$1" in
+  toggle)
+    if active; then
+      off
+      notify-send "Caffeine" "Normal screen and lid sleep restored" -i preferences-desktop-screensaver
+    elif on; then
+      notify-send "Caffeine" "Lid sleep blocked; processes and Wi-Fi stay active" -i preferences-desktop-screensaver
+    else
+      notify-send -u critical "Caffeine error" "Could not block lid sleep" -i dialog-error
+    fi
+    ;;
+  restore)
+    [ -f "$FLAG" ] && on
+    ;;
+  status)
+    active && printf '%%{T3}%%{F#febc2e}󰅶%%{F-}%%{T-}\n' || printf '\n'
+    ;;
+  ison)
+    active && echo yes || echo no
+    ;;
+esac

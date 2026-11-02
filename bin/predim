@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# xss-lock notifier: fade the panel down shortly before the screen locks, and
+# put it back if you touch anything. This is the macOS "screen dims, then locks"
+# behaviour -- the warning that stops a lock from feeling like the machine
+# snapped off mid-thought.
+#
+# Contract with xss-lock (see man xss-lock):
+#   * started when the screen saver activates from inactivity, i.e. at
+#     `xset s TIMEOUT`;
+#   * SIGHUP when the user becomes active again  -> restore, no lock happened;
+#   * SIGTERM when the locker starts             -> restore, then i3lock covers it.
+#   * the locker runs after the first saver CYCLE, so TIMEOUT is the warning
+#     point and CYCLE is how much warning you get. A cycle of 0 means the
+#     notifier never runs at all.
+#
+# Brightness is restored on BOTH signals, deliberately. Handing a screen faded
+# to near-black to the lock screen would read as a dead machine rather than a
+# locked one.
+#
+# The shipped example (/usr/share/doc/xss-lock/dim-screen.sh) drives xbacklight,
+# which is not installed here; this uses brightnessctl, the same tool briosd uses.
+
+FADE_STEPS=12
+FADE_SLEEP=0.03
+FLOOR_PCT=10          # fade to this, not 0 -- a black panel is indistinguishable
+                      # from the screen having already blanked.
+
+DEV=$(brightnessctl -l 2>/dev/null | awk -F"'" '/backlight/ {print $2; exit}')
+
+# No internal panel (external-only). There is nothing to dim, but the notifier
+# must stay alive: xss-lock expects to kill it, and exiting early would make it
+# look like the notification period already ended.
+if [ -z "$DEV" ]; then
+    trap 'exit 0' HUP TERM
+    while :; do sleep 3600 & wait $!; done
+fi
+
+max=$(brightnessctl -d "$DEV" max 2>/dev/null)
+prev=$(brightnessctl -d "$DEV" get 2>/dev/null)
+case "$max$prev" in ''|*[!0-9]*) exit 0 ;; esac
+
+restore() { brightnessctl -d "$DEV" set "$prev" >/dev/null 2>&1; }
+trap 'restore; exit 0' EXIT HUP TERM
+
+floor=$(( max * FLOOR_PCT / 100 ))
+[ "$floor" -lt 1 ] && floor=1
+# Already at or below the floor: nothing to fade, just wait to be killed.
+if [ "$prev" -gt "$floor" ]; then
+    step=$(( (prev - floor) / FADE_STEPS ))
+    [ "$step" -lt 1 ] && step=1
+    level=$prev
+    while [ "$level" -gt "$floor" ]; do
+        level=$(( level - step ))
+        [ "$level" -lt "$floor" ] && level=$floor
+        brightnessctl -d "$DEV" set "$level" >/dev/null 2>&1
+        # `sleep & wait` rather than a bare sleep: a bare sleep is not
+        # interruptible by a trapped signal until it finishes, which would delay
+        # the restore by up to a full step after you move the mouse.
+        sleep "$FADE_SLEEP" & wait $!
+    done
+fi
+
+# Hold the dim until xss-lock kills us (HUP = you came back, TERM = locking).
+while :; do sleep 3600 & wait $!; done

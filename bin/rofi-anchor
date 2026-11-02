@@ -1,0 +1,72 @@
+#!/usr/bin/python3
+"""Print a rofi -theme-str that drops the menu under the pointer.
+
+macmenu.rasi is `location: northeast` with a fixed x-offset, which pins every
+menu to the screen's right edge. That is only correct for the rightmost bar
+module (the clock); a menu opened from the speaker, shield or battery icon
+should appear under THAT icon instead.
+
+Usage:  rofi -dmenu $(rofi-anchor) ...
+        The output is deliberately space-free so it survives unquoted word
+        splitting in callers like rofi-bluetooth, which builds its rofi
+        invocation as a plain string.
+
+Width is read from the theme so the two cannot drift apart.
+"""
+import os
+import re
+import sys
+
+import gi
+
+gi.require_version("Gdk", "3.0")
+from gi.repository import Gdk  # noqa: E402
+
+THEME = os.path.expanduser("~/.config/rofi/macmenu.rasi")
+EDGE_GAP = 10
+FALLBACK_WIDTH = 330
+
+# macmenu.rasi is translucent because picom blurs behind it on i3. GNOME has
+# no blur, so there the menu gets the same solid colour as GNOME's own menus.
+SOLID = ("background-color:#1d1d1d;border-color:#ffffff1a;"
+         if "GNOME" in os.environ.get("XDG_CURRENT_DESKTOP", "").split(":") else "")
+
+
+def theme_width():
+    try:
+        with open(THEME) as fh:
+            m = re.search(r"^\s*width:\s*(\d+)px", fh.read(), re.M)
+        return int(m.group(1)) if m else FALLBACK_WIDTH
+    except OSError:
+        return FALLBACK_WIDTH
+
+
+def main():
+    # argv[2], if given, overrides the theme width -- callers that shrink the
+    # window (the power menu is 280px, not the theme's 330px) must say so or
+    # the offset is computed for the wrong width.
+    width = int(sys.argv[2]) if len(sys.argv) > 2 else theme_width()
+    display = Gdk.Display.get_default()
+    if display is None:
+        print(f"window{{x-offset:-{EDGE_GAP}px;{SOLID}}}")
+        return 0
+    _screen, ptr_x, ptr_y = display.get_default_seat().get_pointer().get_position()
+    # Callers should capture the pointer at LAUNCH and pass it here: a menu
+    # that does slow work first (vpn-menu shells out to forticlient-cli) would
+    # otherwise anchor to wherever the cursor drifted to by build time, not to
+    # the icon that was clicked.
+    px = int(sys.argv[1]) if len(sys.argv) > 1 else ptr_x
+    py = ptr_y
+    geo = display.get_monitor_at_point(px, py).get_geometry()
+
+    # anchor is northeast, so x-offset counts leftward from the right edge.
+    right = geo.x + geo.width
+    desired_right = px + width // 2                 # centre under the pointer
+    desired_right = min(desired_right, right - EDGE_GAP)
+    desired_right = max(desired_right, geo.x + width + EDGE_GAP)
+    print(f"window{{x-offset:-{right - desired_right}px;{SOLID}}}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

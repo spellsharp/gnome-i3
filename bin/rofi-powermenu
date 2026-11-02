@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# macOS-style power menu (Super+Ctrl+x)
+THEME="$HOME/.config/rofi/macmenu.rasi"
+# polybar starts this with a PATH that lacks ~/.local/bin (where xdotool lives);
+# without it the pointer reads as x=0 and the menu lands on the wrong spot.
+export PATH="$HOME/.local/bin:$PATH"
+
+# Drops top-right like every other bar menu. It used to override the theme with
+# `location: center`, which made it the one menu that appeared somewhere else.
+# $1, if given, is the pointer x captured at launch by the caller, so the menu
+# lands under the icon that opened it rather than at the screen edge.
+# No caller arg: capture the pointer ourselves. The old bare `${1:-} 280` made
+# 280 slide into the pointer-x slot when $1 was empty, pinning the menu to a
+# fixed screen position for the $mod+Ctrl+x invocation.
+PX="${1:-$(xdotool getmouselocation --shell 2>/dev/null | sed -n 's/^X=//p')}"
+ANCHOR=$("$HOME/.local/bin/rofi-anchor" "${PX:-0}" 280 2>/dev/null)
+STYLE="window { width: 280px; } inputbar { enabled: false; } listview { lines: 5; } $ANCHOR"
+CONFIRM_STYLE="window { width: 280px; } inputbar { enabled: false; } listview { lines: 2; } $ANCHOR"
+
+confirm() {
+    local ans
+    ans=$(printf '%s\nCancel\n' "$1" | rofi -dmenu -p "Are you sure?" -theme "$THEME" \
+        -theme-str "$CONFIRM_STYLE")
+    [ "$ans" = "$1" ]
+}
+
+choice=$(printf '%s\n' \
+    "󰌾  Lock" \
+    "󰒲  Sleep" \
+    "󰍃  Log Out" \
+    "󰜉  Restart" \
+    "󰐥  Shut Down" \
+    | rofi -dmenu -p Power -theme "$THEME" -theme-str "$STYLE")
+
+case "$choice" in
+    *Lock)      "$HOME/.local/bin/gnome-i3-lock" ;;
+    *Sleep)     systemctl suspend ;;
+    *"Log Out") confirm "Yes, log out"   && { case "$XDG_CURRENT_DESKTOP" in *GNOME*) gnome-session-quit --logout --no-prompt ;; *) i3-msg exit ;; esac; } ;;
+    *Restart)   confirm "Yes, restart"   && systemctl reboot ;;
+    *"Shut Down") confirm "Yes, shut down" && systemctl poweroff ;;
+esac

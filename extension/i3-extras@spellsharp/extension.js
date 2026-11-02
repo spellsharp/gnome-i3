@@ -21,6 +21,17 @@ let spaces = null;
 Gio._promisify(Gio.Subprocess.prototype, 'communicate_utf8_async');
 
 const BIN = `${GLib.get_home_dir()}/.local/bin`;
+
+// A helper from ~/.local/bin when it is there, else the bare name (PATH).
+function prog(name) {
+    const p = `${BIN}/${name}`;
+    return GLib.file_test(p, GLib.FileTest.IS_EXECUTABLE) ? p : name;
+}
+
+// The VPN button needs a vpn-menu script; without one it is left out.
+function hasVpn() {
+    return GLib.file_test(`${BIN}/vpn-menu`, GLib.FileTest.IS_EXECUTABLE);
+}
 const DIM = '#8b93a7';
 const MUTED = '#e6ebf3';
 
@@ -343,8 +354,8 @@ class NowPlayingButton extends BarButton {
         super._init('Now Playing', {
             seconds: 10,
             actions: {
-                left: () => spawn([`${BIN}/playerctl`, 'play-pause']),
-                right: () => spawn([`${BIN}/playerctl`, 'next']),
+                left: () => spawn([prog('playerctl'), 'play-pause']),
+                right: () => spawn([prog('playerctl'), 'next']),
             },
         });
         this.hide();
@@ -438,7 +449,7 @@ class SecondaryBar extends St.Widget {
             new WorkspaceBar(() => monitor.index)]);
         box(Clutter.ActorAlign.CENTER, [new TitleBar()]);
         box(Clutter.ActorAlign.END, [
-            new NowPlayingButton(), screenshotButton(), new VpnButton(),
+            new NowPlayingButton(), screenshotButton(), ...(hasVpn() ? [new VpnButton()] : []),
             new CaffeineButton({inhibit: false}), quickSettingsButton(), separator(), new ClockButton(),
         ]);
     }
@@ -503,7 +514,7 @@ export default class I3Extras extends Extension {
         const lead = [
             add('nowplaying', new NowPlayingButton()),
             add('screenshot', screenshotButton()),
-            add('vpn', new VpnButton()),
+            ...(hasVpn() ? [add('vpn', new VpnButton())] : []),
         ];
         const caffeine = add('caffeine', new CaffeineButton());
         this._buttons = [apple, this._ws, ...lead, caffeine];

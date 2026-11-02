@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Lock screen (GNOME)
+Comment=i3lock via xss-lock; GNOME's own lock screen needs GDM, which this machine does not use
+Exec=@HOME@/.local/bin/gnome-lock-daemon
+OnlyShowIn=GNOME;
+X-GNOME-Autostart-enabled=true

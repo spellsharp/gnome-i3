@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# macOS-style Accessibility shortcuts panel (rofi applet), bound to $mod+Ctrl+a.
+# Mirrors the Cmd+Opt+F5 panel on macOS: the handful of assistive features you
+# want to flip on and off quickly, in one place, showing their current state.
+#
+# Styled and structured after rofi-controlcenter so the two feel like the same
+# OS. Uses macspotlight.rasi (centred) rather than macmenu.rasi (anchored to the
+# bar icon that opened it) because this panel is opened from the keyboard, so
+# there is no meaningful pointer anchor.
+THEME="$HOME/.config/rofi/macspotlight.rasi"
+
+# `xkbset q` prints the live AccessX state; parse once rather than per-row.
+#
+# Match the whole "<Feature> = On" line, not a substring: `xkbset q` also prints
+# "Mouse-Keys Acceleration = On" directly under "Mouse-Keys = Off", so a loose
+# pattern reports Mouse Keys as enabled when it is not.
+xk=$(xkbset q 2>/dev/null)
+on_off() { printf '%s\n' "$xk" | grep -qx "$1 = On" && echo on || echo off; }
+
+sticky=$(on_off 'Sticky-Keys')
+mousek=$(on_off 'Mouse-Keys')
+[ -n "$(pgrep -x orca)" ]   && sr_row="󰗋  Screen Reader: on"  || sr_row="󰗋  Screen Reader: off"
+[ -n "$(pgrep -x magnus)" ] && zoom_row="󰍉  Zoom: on"         || zoom_row="󰍉  Zoom: off"
+[ "$sticky" = on ] && sticky_row="󰌌  Sticky Keys: on" || sticky_row="󰌌  Sticky Keys: off"
+[ "$mousek" = on ] && mouse_row="󰍽  Mouse Keys: on"  || mouse_row="󰍽  Mouse Keys: off"
+
+slow=$(on_off 'Slow-Keys')
+[ "$slow" = on ] && slow_row="󰌐  Slow Keys: on" || slow_row="󰌐  Slow Keys: off"
+
+choice=$(printf '%s\n' \
+  "$zoom_row" \
+  "$sr_row" \
+  "$sticky_row" \
+  "$slow_row" \
+  "$mouse_row" \
+  "󰊤  Bigger text (appearance)" \
+  | rofi -dmenu -i -p "Accessibility" -theme "$THEME" -theme-str 'entry { placeholder: "Search accessibility"; }')
+
+case "$choice" in
+  *"Zoom"*)
+    # magnus is a magnifier *window*, so toggling it means starting/killing it.
+    if pgrep -x magnus >/dev/null; then pkill -x magnus
+    else setsid magnus >/dev/null 2>&1 </dev/null & fi
+    ;;
+  *"Screen Reader"*)
+    if pgrep -x orca >/dev/null; then pkill -x orca
+    else setsid orca >/dev/null 2>&1 </dev/null & fi
+    ;;
+  *"Sticky Keys"*)
+    # `exp` pins the setting: without it X's AccessX timeout silently switches
+    # sticky keys back off after a period of no use, which reads as the toggle
+    # not having worked.
+    if [ "$sticky" = on ]; then xkbset -sticky
+    else xkbset sticky -twokey -latchlock; xkbset exp 1 =sticky; fi
+    ;;
+  *"Slow Keys"*)
+    if [ "$slow" = on ]; then xkbset -slowkeys
+    else xkbset slowkeys 300; xkbset exp 1 =slowkeys; fi
+    ;;
+  *"Mouse Keys"*)
+    # Move the pointer with the numeric keypad.
+    if [ "$mousek" = on ]; then xkbset -m
+    else xkbset m; xkbset exp 1 =m; fi
+    ;;
+  *"Bigger text"*)
+    exec xfce4-settings-manager
+    ;;
+esac

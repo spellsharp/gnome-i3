@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# GNOME twin of raise-or-run: focus a window whose WM_CLASS contains CLASS
+# (case-insensitive, via wmctrl), otherwise launch CMD.
+class="$1"; shift
+wmctrl -x -a "$class" 2>/dev/null && exit 0
+setsid "$@" >/dev/null 2>&1 &

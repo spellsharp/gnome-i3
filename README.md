@@ -1,36 +1,99 @@
 # gnome-i3
 
-i3-style GNOME 46 (X11) setup, turned on and off with one command.
+i3 window manager behaviour inside GNOME, with one on/off switch.
 
-    gnome-i3 on       # i3 keys, Forge tiling, per-monitor workspaces
-    gnome-i3 off      # plain GNOME; Super+L locks with i3lock
-    gnome-i3 toggle   # also the "i3 Mode" launcher in the app grid
-    gnome-i3 status
+You keep GNOME's top bar menus (Wi-Fi, Bluetooth, sound, Quick Settings) and
+get i3's keyboard-driven tiling and per-monitor workspaces.
 
-## Parts
+```bash
+git clone https://github.com/spellsharp/gnome-i3.git
+cd gnome-i3
+./install.sh
+```
 
-- `extension/i3-extras@spellsharp/` — GNOME Shell extension, linked from
-  `~/.local/share/gnome-shell/extensions/`. Per-monitor i3 workspaces
-  (`workspaces.js`), desk pins (1-2 portrait, 3-4 BenQ, 5 laptop, only with
-  the 3-monitor desk set), top bar and secondary bars (`extension.js`).
-  JS changes need a GNOME Shell restart: Alt+F2, r, Enter.
-- `forge-patches/forge-local.patch` — two fixes to Forge v89 `tree.js`
-  (portrait monitor split; move to next monitor uses the window's monitor,
-  not the pointer's). A Forge update removes them; `gnome-i3 on` applies
-  them again.
-- `keys/` — gsettings scripts for the i3 key bindings and Forge keys, and
-  their undo scripts.
-- `autostart/greenclip-gnome.desktop` — clipboard daemon (Super+Shift+V).
-- `bin/gnome-i3` — the switch. Linked as `~/.local/bin/gnome-i3`.
+Then log out and log in. Done.
 
-## Not in the switch
+## Requirements
 
-Machine fixes that stay on in both modes: lock daemon
-(`~/.config/autostart/xss-lock-gnome.desktop`), VPN tray, monitor layouts
-(`display-auto-v2`). Helper scripts (`raise-or-run-gnome`, `gnome-dnd-toggle`,
-`spotlight`) stay in `~/.local/bin`.
+- Ubuntu 24.04 with GNOME 46.
+- An **Xorg** session. At the login screen, click the gear icon and pick
+  "Ubuntu on Xorg". (Wayland is not supported: the helpers use X11 tools.)
+- `sudo` for the apt packages (or run `./install.sh --no-apt` and install
+  them yourself; the list is at the top of `install.sh`).
 
-## Safety
+## The switch
 
-Each run saves a full `dconf dump /` in `~/.local/state/gnome-i3/` first.
-Old file versions from before this repo: `~/2_System/gnome-i3-backups/`.
+```bash
+gnome-i3 on       # i3 mode
+gnome-i3 off      # plain GNOME
+gnome-i3 toggle   # same as the "i3 Mode" launcher in the app grid
+gnome-i3 status
+```
+
+Every run saves a full `dconf dump /` in `~/.local/state/gnome-i3/` first.
+
+## What i3 mode gives you
+
+- **Tiling** with [Forge](https://github.com/forge-ext/forge) and i3 keys:
+  `Super+h/j/k/l` or arrows focus, `Super+Shift+…` move, `Super+Ctrl+…`
+  resize, `Super+z/v` split, `Super+e` toggle split, `Super+s` stacked,
+  `Super+w` tabbed, `Super+Shift+Space` float, `Super+f` fullscreen,
+  `Super+Shift+q` close.
+- **i3 workspaces per monitor**: `Super+1…0` shows a workspace on the
+  monitor where it lives, `Super+Shift+1…0` moves the window. Each monitor
+  shows its own workspace, as in i3. A new workspace opens on the monitor
+  under the mouse. When a monitor is unplugged, its workspaces move to the
+  remaining monitors.
+- **Desk pins** (only with 3 monitors, one of them portrait, and a landscape
+  primary): workspaces 1–2 on the portrait monitor, 3–4 on the other
+  landscape monitor, 5 on the primary.
+- **i3/polybar-style top bar** on every monitor: numbered workspaces (only
+  used ones), window title, now playing, screenshot, VPN (only if you have a
+  `~/.local/bin/vpn-menu` script), caffeine, clock.
+- **Launchers**: `Super+Return` terminal, `Super+d` spotlight search,
+  `Super+q` browser (Brave), `Super+o` files, `Super+Shift+v` clipboard
+  history, `Super+.` emoji, `Super+x` lock, `Super+Ctrl+x` power,
+  `Super+Shift+s` / `Print` screenshot.
+
+## Lock screen
+
+GNOME's own lock screen needs GDM. Many setups use LightDM instead, so
+`install.sh` adds an i3lock locker (lock after 20 minutes idle, and before
+sleep) that stays on in both modes. In plain GNOME mode `Super+L` locks.
+With [i3lock-color](https://github.com/Raymo111/i3lock-color) and a picture
+at `~/.cache/lock-wallpaper-v4.jpg` the lock screen shows a clock on the
+picture; otherwise it is plain i3lock on a dark colour.
+
+## Repo layout
+
+| Path | What |
+|---|---|
+| `install.sh`, `uninstall.sh` | set up / remove for the current user |
+| `bin/gnome-i3` | the switch |
+| `bin/*` | helpers (spotlight, clipboard, rofi menus, lock, caffeine, …) |
+| `extension/i3-extras@spellsharp/` | GNOME Shell extension: workspaces, bars |
+| `forge-patches/` | 2 fixes to Forge v89 (portrait monitor split; moving a window to another monitor uses the window's monitor, not the mouse's) |
+| `keys/` | gsettings scripts for the key bindings, and their undo |
+| `autostart/`, `applications/`, `rofi/` | autostart entries, launcher, themes |
+
+`install.sh` links these files into `~/.local/bin`, `~/.config/rofi` and
+`~/.local/share/gnome-shell/extensions`, so `git pull` updates a running
+setup (extension changes need a log out, or `Alt+F2`, `r` on Xorg).
+Existing files are moved to `~/.local/state/gnome-i3/backup-<time>/` first.
+
+A Forge update from extensions.gnome.org removes the patches; `gnome-i3 on`
+applies them again.
+
+## Uninstall
+
+```bash
+./uninstall.sh
+```
+
+## Known limits
+
+- Plain GNOME mode forgets which workspace a window on a secondary monitor
+  was on (GNOME shows secondary monitors on every workspace).
+- A nested split (A | (B over C)) comes back flat (A | B | C) after you
+  leave and return to a workspace. Forge does this.
+- Forge logs `this.ext.settings is null` when it is turned off. Harmless.

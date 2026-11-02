@@ -51,7 +51,22 @@ patch_forge() {
 }
 
 ext_on() {
-    gnome-extensions enable "$1" 2>/dev/null || say "WARNING: cannot enable $1 (restart GNOME Shell, then run again)"
+    gnome-extensions enable "$1" 2>/dev/null && return
+    # Not known to the running shell yet (just installed): add it to the
+    # enabled list; it loads at the next login (or Alt+F2 r on Xorg).
+    python3 - "$1" <<'PY'
+import ast, subprocess, sys
+u = sys.argv[1]
+def get(k):
+    v = subprocess.run(["gsettings", "get", "org.gnome.shell", k], capture_output=True, text=True).stdout.strip()
+    return [] if v.startswith("@as") else ast.literal_eval(v)
+en, dis = get("enabled-extensions"), get("disabled-extensions")
+if u not in en:
+    subprocess.run(["gsettings", "set", "org.gnome.shell", "enabled-extensions", str(en + [u])])
+if u in dis:
+    subprocess.run(["gsettings", "set", "org.gnome.shell", "disabled-extensions", str([x for x in dis if x != u])])
+PY
+    say "$1 loads at the next login (or Alt+F2, r, Enter on Xorg)."
 }
 
 ext_off() {
@@ -64,7 +79,7 @@ lock_key_on() {
     local s="$MK.custom-keybinding:$LOCK_PATH"
     gsettings set "$s" name "Lock (i3lock)"
     gsettings set "$s" binding "<Super>l"
-    gsettings set "$s" command "$HOME/.config/scripts/lock-v4"
+    gsettings set "$s" command "$HOME/.local/bin/gnome-i3-lock"
     local cur
     cur=$(gsettings get "$MK" custom-keybindings)
     case "$cur" in
@@ -88,8 +103,11 @@ do_on() {
     lock_key_off
     bash "$R/keys/apply-i3-keys.sh"
     bash "$R/keys/apply-forge.sh"
-    ln -sf "$R/autostart/greenclip-gnome.desktop" "$HOME/.config/autostart/greenclip-gnome.desktop"
-    pgrep -x greenclip >/dev/null || (setsid "$HOME/.local/bin/greenclip" daemon >/dev/null 2>&1 &)
+    mkdir -p "$HOME/.config/autostart"
+    sed "s|@HOME@|$HOME|g" "$R/autostart/greenclip-gnome.desktop" > "$HOME/.config/autostart/greenclip-gnome.desktop"
+    if [ -x "$HOME/.local/bin/greenclip" ] && ! pgrep -x greenclip >/dev/null; then
+        (setsid "$HOME/.local/bin/greenclip" daemon >/dev/null 2>&1 &)
+    fi
     ext_on forge@jmmaranan.com
     ext_on "$I3X"
     echo on > "$STATE/mode"

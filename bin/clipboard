@@ -1,0 +1,297 @@
+#!/usr/bin/python3
+"""Clipboard history app for i3 (GTK3), opened with Super+Shift+V.
+
+Replaces the rofi list. History comes from greenclip (the daemon keeps
+recording as before); this is only the window you pick from.
+
+  type          filter the list
+  Up / Down     move
+  Enter, click  copy that entry to the clipboard and close
+  Ctrl+1..9     copy entry 1..9 directly
+  Esc           close (clicking outside closes it too)
+
+Images show as thumbnails from greenclip's image cache. Selecting an entry
+hands the exact history line back to `greenclip print <line>`, which is how
+greenclip restores both text and images.
+
+Uses /usr/bin/python3 explicitly: `python3` on PATH is conda's, which has no
+PyGObject. Run with CLIPBOARD_STAY=1 to keep it open on focus loss (testing).
+"""
+
+import fcntl
+import os
+import re
+import subprocess
+import sys
+
+import gi
+
+gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
+from gi.repository import Gdk, GdkPixbuf, GLib, Gtk, Pango  # noqa: E402
+
+GREENCLIP = os.path.expanduser("~/.local/bin/greenclip")
+IMAGE_DIR = "/tmp/greenclip"
+LOCK = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "clipboard-app.lock")
+WIDTH = 640
+MAX_ROWS = 9
+THUMB_H = 56
+NBSP = " "  # greenclip writes newlines inside an entry as NBSP
+IMAGE_RE = re.compile(r"^image/\S+ .* (-?\d+)$")
+
+# Same palette as the eww desktop cards (eww.scss), a little more opaque
+# because this sits on top of windows, not on the wallpaper.
+CSS = b"""
+#root {
+    background-color: rgba(28, 28, 28, 0.96);
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    border-top-color: rgba(255, 255, 255, 0.32);
+    border-radius: 20px;
+}
+#bar { padding: 14px 18px 10px 18px; }
+#title { font: 700 15px Inter; color: #f5f5f7; }
+#count { font: 500 12px Inter; color: rgba(245, 247, 250, 0.52); }
+entry#query {
+    background-color: rgba(255, 255, 255, 0.07);
+    border: none;
+    box-shadow: none;
+    border-radius: 10px;
+    color: #f5f5f7;
+    caret-color: #f5f5f7;
+    font: 500 14px Inter;
+    padding: 8px 12px;
+    margin: 0 14px 8px 14px;
+}
+list { background: transparent; }
+row {
+    background: transparent;
+    border-radius: 10px;
+    padding: 7px 10px;
+    margin: 1px 8px;
+}
+row:selected, row:hover { background-color: rgba(255, 255, 255, 0.10); }
+.clip  { font: 500 13px Inter; color: #f5f5f7; }
+.meta  { font: 500 11px Inter; color: rgba(245, 247, 250, 0.52); }
+.key   { font: 600 11px "JetBrains Mono"; color: rgba(245, 247, 250, 0.52); }
+.empty { font: 500 13px Inter; color: rgba(245, 247, 250, 0.52); padding: 24px; }
+#results { margin-bottom: 10px; }
+"""
+
+
+def load_history():
+    try:
+        out = subprocess.run([GREENCLIP, "print"], capture_output=True,
+                             text=True, timeout=5).stdout
+    except Exception:
+        return []
+    items = []
+    for line in out.split("\n"):
+        if not line.strip() or line.startswith("Greenclip has been updated"):
+            continue
+        m = IMAGE_RE.match(line)
+        if m:
+            path = os.path.join(IMAGE_DIR, m.group(1) + ".png")
+            items.append({"line": line, "image": path if os.path.exists(path) else None,
+                          "text": "", "search": "image picture screenshot"})
+        else:
+            text = line.replace(NBSP, "\n")
+            items.append({"line": line, "image": None, "text": text,
+                          "search": text.lower()})
+    return items
+
+
+class Clipboard(Gtk.Window):
+    def __init__(self):
+        super().__init__(type=Gtk.WindowType.TOPLEVEL)
+        self.set_decorated(False)
+        self.set_app_paintable(True)
+        self.set_resizable(False)
+        self.set_keep_above(True)
+        self.set_skip_taskbar_hint(True)
+        self.set_skip_pager_hint(True)
+        self.set_type_hint(Gdk.WindowTypeHint.DIALOG)
+        self.set_size_request(WIDTH, -1)
+        self.set_wmclass("clipboard", "Clipboard")
+        visual = self.get_screen().get_rgba_visual()
+        if visual:
+            self.set_visual(visual)
+
+        provider = Gtk.CssProvider()
+        provider.load_from_data(CSS)
+        Gtk.StyleContext.add_provider_for_screen(
+            self.get_screen(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+        self.items = load_history()
+        self.shown = []
+
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        root.set_name("root")
+        self.add(root)
+
+        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        bar.set_name("bar")
+        title = Gtk.Label(label="Clipboard", xalign=0.0)
+        title.set_name("title")
+        self.count = Gtk.Label(xalign=1.0)
+        self.count.set_name("count")
+        bar.pack_start(title, True, True, 0)
+        bar.pack_start(self.count, False, False, 0)
+        root.pack_start(bar, False, False, 0)
+
+        self.entry = Gtk.Entry()
+        self.entry.set_name("query")
+        self.entry.set_has_frame(False)
+        self.entry.set_placeholder_text("Search clipboard history")
+        self.entry.connect("changed", lambda *_: self.refresh())
+        self.entry.connect("activate", lambda *_: self.pick_selected())
+        root.pack_start(self.entry, False, False, 0)
+
+        self.list = Gtk.ListBox()
+        self.list.set_selection_mode(Gtk.SelectionMode.BROWSE)
+        self.list.set_activate_on_single_click(True)
+        self.list.connect("row-activated", lambda _l, row: self.pick(row.get_index()))
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_name("results")
+        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroll.set_max_content_height(MAX_ROWS * 52)
+        scroll.set_propagate_natural_height(True)
+        scroll.add(self.list)
+        root.pack_start(scroll, True, True, 0)
+
+        self.connect("key-press-event", self.on_key)
+        if not os.environ.get("CLIPBOARD_STAY"):
+            self.connect("focus-out-event", lambda *_: Gtk.main_quit())
+        self.connect("destroy", Gtk.main_quit)
+        self.refresh()
+
+    # ---- list ----------------------------------------------------------
+    def refresh(self):
+        q = self.entry.get_text().strip().lower()
+        self.shown = [it for it in self.items if not q or q in it["search"]]
+        for child in self.list.get_children():
+            self.list.remove(child)
+        for i, it in enumerate(self.shown):
+            self.list.add(self.make_row(i, it))
+        if not self.shown:
+            lbl = Gtk.Label(label="Nothing matches" if q else "Clipboard history is empty")
+            lbl.get_style_context().add_class("empty")
+            self.list.add(lbl)
+        n = len(self.items)
+        self.count.set_text(f"{len(self.shown)} of {n}" if q else f"{n} items")
+        self.list.show_all()
+        first = self.list.get_row_at_index(0)
+        if first and self.shown:
+            self.list.select_row(first)
+        self.resize(WIDTH, 1)
+
+    def make_row(self, i, it):
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        key = Gtk.Label(label=f"⌃{i + 1}" if i < 9 else "", xalign=0.0)
+        key.get_style_context().add_class("key")
+        key.set_width_chars(3)
+        box.pack_start(key, False, False, 0)
+        if it["image"] is not None or IMAGE_RE.match(it["line"]):
+            img = Gtk.Image()
+            try:
+                pb = GdkPixbuf.Pixbuf.new_from_file_at_scale(it["image"], -1, THUMB_H, True)
+                if pb.get_width() > 260:
+                    pb = GdkPixbuf.Pixbuf.new_from_file_at_scale(it["image"], 260, -1, True)
+                img.set_from_pixbuf(pb)
+            except Exception:
+                img.set_from_icon_name("image-x-generic", Gtk.IconSize.DIALOG)
+            box.pack_start(img, False, False, 0)
+            meta = Gtk.Label(label="Image", xalign=0.0)
+            meta.get_style_context().add_class("meta")
+            box.pack_start(meta, True, True, 0)
+        else:
+            text = it["text"]
+            lines = text.split("\n")
+            first = Gtk.Label(label=" ".join(lines[0].split()) or "(blank)", xalign=0.0)
+            first.get_style_context().add_class("clip")
+            first.set_ellipsize(Pango.EllipsizeMode.END)
+            first.set_max_width_chars(60)
+            col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+            col.pack_start(first, False, False, 0)
+            if len(lines) > 1:
+                more = Gtk.Label(label=f"{len(lines)} lines · {len(text)} chars", xalign=0.0)
+                more.get_style_context().add_class("meta")
+                col.pack_start(more, False, False, 0)
+            box.pack_start(col, True, True, 0)
+        row = Gtk.ListBoxRow()
+        row.add(box)
+        if it["text"]:
+            row.set_tooltip_text(it["text"][:600])
+        return row
+
+    # ---- actions -------------------------------------------------------
+    def pick_selected(self):
+        row = self.list.get_selected_row()
+        if row is not None:
+            self.pick(row.get_index())
+
+    def pick(self, index):
+        if not (0 <= index < len(self.shown)):
+            return
+        line = self.shown[index]["line"]
+        subprocess.Popen([GREENCLIP, "print", line], start_new_session=True,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        Gtk.main_quit()
+
+    def on_key(self, _w, event):
+        name = Gdk.keyval_name(event.keyval) or ""
+        ctrl = event.state & Gdk.ModifierType.CONTROL_MASK
+        if name == "Escape":
+            Gtk.main_quit()
+            return True
+        if ctrl and name.isdigit() and name != "0":
+            self.pick(int(name) - 1)
+            return True
+        if name in ("Down", "Up"):
+            row = self.list.get_selected_row()
+            i = row.get_index() if row else -1
+            i = min(i + 1, len(self.shown) - 1) if name == "Down" else max(i - 1, 0)
+            target = self.list.get_row_at_index(i)
+            if target:
+                self.list.select_row(target)
+                target.grab_focus()
+                self.entry.grab_focus_without_selecting()
+            return True
+        return False
+
+    def place(self):
+        display = Gdk.Display.get_default()
+        _s, px, py = display.get_default_seat().get_pointer().get_position()
+        geo = display.get_monitor_at_point(px, py).get_geometry()
+        self.move(geo.x + (geo.width - WIDTH) // 2, geo.y + int(geo.height * 0.15))
+
+
+def main():
+    # Singleton toggle: a second Super+Shift+V closes the open window.
+    lock = open(LOCK, "a+")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        lock.seek(0)
+        try:
+            os.kill(int(lock.read().strip() or 0), 15)
+        except (ValueError, ProcessLookupError, PermissionError):
+            pass
+        return 0
+    lock.seek(0)
+    lock.truncate()
+    lock.write(str(os.getpid()))
+    lock.flush()
+
+    win = Clipboard()
+    win.realize()
+    win.place()
+    win.show_all()
+    win.present_with_time(Gdk.CURRENT_TIME)
+    win.entry.grab_focus()
+    GLib.unix_signal_add(GLib.PRIORITY_HIGH, 15, Gtk.main_quit)
+    Gtk.main()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,60 @@
+#!/bin/sh
+# Lock screen for gnome-i3 (GNOME's own lock needs GDM; this works with any
+# display manager). With i3lock-color and a wallpaper at
+# ~/.cache/lock-wallpaper-v4.jpg: clock + blurred picture. Otherwise: plain
+# i3lock on a dark colour.
+
+PAUSE="$HOME/.cache/macdock.pause"
+CACHE="$HOME/.cache/lock-wallpaper-v4.jpg"
+FG='#f3f5f9ff'
+WHITE='#ffffffff'
+ACC='#8ab4f8ff'
+RED='#ff5f57ff'
+HL='#ffffffd0'
+SUBTLE='#ffffff33'
+TRANS='#00000000'
+
+if pgrep -x i3lock >/dev/null 2>&1; then
+    exit 0
+fi
+
+touch "$PAUSE"
+trap 'rm -f "$PAUSE"' EXIT INT TERM
+
+# Plain i3lock has no --clock; it is i3lock-color's version string with ".c.".
+if ! i3lock --version 2>&1 | grep -q '\.c\.' || [ ! -f "$CACHE" ]; then
+    i3lock --nofork -c 0d0f13
+    exit 0
+fi
+
+started=$(date +%s)
+i3lock --nofork --image="$CACHE" --fill \
+  --clock \
+  --time-str="%I:%M %p" \
+  --date-str="%A, %B %e" \
+  --time-font="Inter" --date-font="Inter" --layout-font="Inter" \
+  --time-size=58 --date-size=22 \
+  --time-color=$FG --date-color=$FG \
+  --time-pos="ix:iy-170" --date-pos="ix:iy-128" \
+  --radius=46 --ring-width=4 \
+  --inside-color=$TRANS      --ring-color=$SUBTLE \
+  --insidever-color=$TRANS   --ringver-color=$ACC \
+  --insidewrong-color=$TRANS --ringwrong-color=$RED \
+  --line-color=$TRANS --separator-color=$TRANS \
+  --keyhl-color=$HL --bshl-color=$RED \
+  --verif-color=$FG --wrong-color=$FG \
+  --verif-text="" --wrong-text="" --noinput-text="" --lock-text="" \
+  --modif-color=$WHITE --modif-size=16 --modif-pos="ix:iy-72" \
+  --indicator
+status=$?
+elapsed=$(( $(date +%s) - started ))
+
+if [ "$status" -ne 0 ] && [ "$elapsed" -lt 2 ]; then
+    printf '%s gnome-i3-lock: styled i3lock failed (exit %s), falling back\n' \
+        "$(date '+%F %T')" "$status" >> "$HOME/.cache/lock-failures.log"
+    notify-send -u critical "Lock screen degraded" \
+        "The low-memory lock profile failed. The plain locker is active." 2>/dev/null
+    i3lock --nofork -c 0d0f13
+fi
+
+rm -f "$PAUSE"

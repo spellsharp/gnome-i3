@@ -1,0 +1,280 @@
+#!/usr/bin/env bash
+# Spotlight-style rofi mode: apps + file search + calculator + web fallback.
+#
+#   * rows: every launchable app (as before), then indexed files/folders from
+#     ~/.cache/spotlight-index (rebuilt in the background when >15 min old).
+#   * Enter on an app        -> launch it
+#   * Enter on a file/folder -> xdg-open
+#   * Enter on a math query  -> result copied to clipboard + shown as a banner
+#     ("23*45", "=2^10", "10 km to mi", "72 f to c")
+#   * Enter on anything else -> Brave web search (unchanged)
+
+INDEX="$HOME/.cache/spotlight-index"
+MAX_FILES=30000
+
+reindex() {
+    tmp="$INDEX.tmp.$$"
+    if command -v fdfind >/dev/null 2>&1; then
+        # fd skips hidden dirs by default and is much faster than find
+        {
+            fdfind --max-depth 5 -t d \
+                -E node_modules -E __pycache__ -E 'miniconda*' -E snap \
+                -E venv -E .venv -E 'Cache*' \
+                . "$HOME" 2>/dev/null | sed 's/^/d /'
+            fdfind --max-depth 5 -t f \
+                -E node_modules -E __pycache__ -E 'miniconda*' -E snap \
+                -E venv -E .venv -E 'Cache*' \
+                . "$HOME" 2>/dev/null | sed 's/^/f /'
+        } | head -n "$MAX_FILES" > "$tmp"
+    else
+        find "$HOME" -mindepth 1 -maxdepth 5 \
+            \( -name '.*' -o -name node_modules -o -name __pycache__ \
+               -o -name 'miniconda*' -o -name snap -o -name venv -o -name .venv \) \
+            -prune -o -printf '%y %p\n' 2>/dev/null | head -n "$MAX_FILES" > "$tmp"
+    fi
+    # shallow paths first, so short obvious hits outrank deep clutter
+    awk '{ n=gsub(/\//,"/"); print n "\t" $0 }' "$tmp" | sort -n | cut -f2- > "$tmp.sorted" \
+        && mv "$tmp.sorted" "$INDEX" && rm -f "$tmp"
+}
+
+case "$1" in --reindex) reindex; exit 0 ;; esac
+
+calc() {
+    # -> prints the result, or fails if the query isn't calculable
+    local q="${1#=}"
+    # "15% of 80" -> "80*15/100": qalc misparses the "of" phrasing (rem(15,1B))
+    if [[ "$q" =~ ^([0-9.]+)%\ +of\ +([0-9.]+)$ ]]; then
+        q="${BASH_REMATCH[2]}*${BASH_REMATCH[1]}/100"
+    fi
+    if command -v qalc >/dev/null 2>&1; then
+        # </dev/null + timeout are load-bearing: qalc can PROMPT on stdin
+        # (e.g. "download exchange rates now?"), and a blocked script keeps
+        # rofi waiting -- while rofi holds the keyboard grab, so the whole
+        # desktop reads as frozen. Never let anything here touch stdin.
+        local r
+        r=$(timeout 3 qalc -t -- "$q" </dev/null 2>/dev/null) || return 1
+        [ -n "$r" ] && [ "$r" != "$q" ] && { printf '%s\n' "$r"; return 0; }
+        return 1
+    fi
+    python3 - "$q" <<'PYEOF'
+import ast, math, operator, sys
+q = sys.argv[1].strip().lower()
+
+UNITS = {  # (factor to SI-ish base, base) — enough for everyday conversions
+    "km": (1000, "m"), "m": (1, "m"), "cm": (0.01, "m"), "mm": (0.001, "m"),
+    "mi": (1609.344, "m"), "ft": (0.3048, "m"), "in": (0.0254, "m"), "yd": (0.9144, "m"),
+    "kg": (1, "kg"), "g": (0.001, "kg"), "lb": (0.45359237, "kg"), "oz": (0.028349523, "kg"),
+    "l": (1, "l"), "ml": (0.001, "l"), "gal": (3.785411784, "l"),
+    "gb": (1024, "mb"), "mb": (1, "mb"), "tb": (1048576, "mb"), "kb": (1/1024, "mb"),
+    "h": (3600, "s"), "min": (60, "s"), "s": (1, "s"), "day": (86400, "s"),
+}
+def convert(q):
+    import re
+    m = re.match(r"^([-\d.]+)\s*([a-z]+)\s+(?:to|in)\s+([a-z]+)$", q)
+    if not m: return None
+    v, a, b = float(m.group(1)), m.group(2), m.group(3)
+    if a in ("c","f") and b in ("c","f"):
+        r = v*9/5+32 if (a,b)==("c","f") else (v-32)*5/9
+        return f"{r:g} {b.upper()}"
+    if a in UNITS and b in UNITS and UNITS[a][1] == UNITS[b][1]:
+        return f"{v*UNITS[a][0]/UNITS[b][0]:g} {b}"
+    return None
+
+r = convert(q)
+if r is not None:
+    print(r); sys.exit(0)
+
+OPS = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
+       ast.Div: operator.truediv, ast.Pow: operator.pow, ast.Mod: operator.mod,
+       ast.FloorDiv: operator.floordiv, ast.USub: operator.neg, ast.UAdd: operator.pos}
+NAMES = {k: v for k, v in vars(math).items() if not k.startswith("_")}
+def ev(n):
+    if isinstance(n, ast.Expression): return ev(n.body)
+    if isinstance(n, ast.Constant) and isinstance(n.value, (int, float)): return n.value
+    if isinstance(n, ast.BinOp): return OPS[type(n.op)](ev(n.left), ev(n.right))
+    if isinstance(n, ast.UnaryOp): return OPS[type(n.op)](ev(n.operand))
+    if isinstance(n, ast.Name) and n.id in NAMES: return NAMES[n.id]
+    if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in NAMES:
+        return NAMES[n.func.id](*[ev(a) for a in n.args])
+    raise ValueError
+try:
+    v = ev(ast.parse(q.replace("^", "**"), mode="eval"))
+    print(f"{v:g}" if isinstance(v, float) else v)
+except Exception:
+    sys.exit(1)
+PYEOF
+}
+
+if [ "$ROFI_RETV" = 1 ]; then
+    # usage log for frecency ordering (see the emit block below)
+    printf '%s\t%s\n' "$(date +%s)" "$ROFI_INFO" >> "$HOME/.cache/spotlight-usage" 2>/dev/null
+    case "$ROFI_INFO" in
+        URL:*)  setsid brave "${ROFI_INFO#URL:}" >/dev/null 2>&1 & ;;
+        FILE:*) setsid xdg-open "${ROFI_INFO#FILE:}" >/dev/null 2>&1 & ;;
+        *)      setsid gtk-launch "$ROFI_INFO" >/dev/null 2>&1 & ;;
+    esac
+    exit 0
+elif [ "$ROFI_RETV" = 2 ]; then
+    q="$1"
+    # calculator / unit conversion first; only real math short-circuits.
+    # Regexes live in variables: an unquoted '(' inside a bracket expression
+    # confuses [[ ]]'s tokenizer (it reads it as a grouping paren).
+    re_math='^[=0-9(+.,-]'
+    re_func='^[a-z]+[a-z0-9]*\('
+    re_num='[0-9]'
+    if [[ "$q" =~ $re_math ]] || [[ "$q" =~ $re_func ]] || \
+       { [[ "$q" == *" to "* ]] && [[ "$q" =~ $re_num ]]; }; then
+        if r=$(calc "$q"); then
+            # xclip stays resident to serve the selection; its stdout/stderr
+            # MUST be redirected away from rofi's pipe, or the fork keeps the
+            # pipe's write end open and rofi waits for EOF forever -- with the
+            # keyboard grabbed. This was the "whole system hangs" bug.
+            printf '%s' "$r" | xclip -selection clipboard >/dev/null 2>&1
+            notify-send -a Spotlight "= $r" "${q#=}   (copied to clipboard)" \
+                -i accessories-calculator >/dev/null 2>&1
+            exit 0
+        fi
+    fi
+    # spotlight-route turns "youtube lofi", "wa", "gh owner/repo" or a bare
+    # host into the URL that was actually meant; plain prose falls back to a
+    # web search. No --new-window: that spawned a bare popup window every time,
+    # a plain URL hands the page to the running Brave as a normal tab.
+    url=$(spotlight-route "$q" </dev/null 2>/dev/null) || \
+        url="https://www.google.com/search?q=$(python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(" ".join(sys.argv[1:])))' "$q")"
+    setsid brave "$url" >/dev/null 2>&1 &
+    exit 0
+fi
+
+# ---- initial call: emit apps, then indexed files ----
+# index freshness: rebuild in the background when stale, synchronously on first run
+if [ ! -s "$INDEX" ]; then
+    reindex
+elif [ -n "$(find "$INDEX" -mmin +15 2>/dev/null)" ]; then
+    setsid "$0" --reindex >/dev/null 2>&1 &
+fi
+
+# favicons for the site rows: cheap no-op once cached, so just make sure
+# every site in the catalogue has one before the rows are drawn
+setsid spotlight-icons >/dev/null 2>&1 &
+
+python3 - "$INDEX" <<'PYEOF'
+import os, glob, sys, configparser, html
+
+esc = html.escape
+sys.stdout.write('\0prompt\x1f\uf002\n')
+sys.stdout.write('\0markup-rows\x1ftrue\n')
+
+# rows are buffered, then re-ordered by frecency at the end
+class _Buf(list):
+    def write(self, s): self.append(s)
+out = _Buf()
+
+# ---------------- websites (top of the list, above apps and files) --------
+# One row per entry in spotlight-route's catalogue, carrying the site's own
+# favicon. Typing "whatsapp" then hits WhatsApp itself, not a file that
+# happens to have the word in its name.
+import subprocess
+
+ICONDIR = os.path.expanduser("~/.cache/spotlight-icons")
+try:
+    listing = subprocess.run(["spotlight-route", "--list"], capture_output=True,
+                             text=True, timeout=5, stdin=subprocess.DEVNULL).stdout
+except Exception:
+    listing = ""
+for line in listing.splitlines():
+    parts = line.split("\t")
+    if len(parts) < 4:
+        continue
+    key, title, home, host = parts[:4]
+    aliases = parts[4] if len(parts) > 4 else ""
+    icon = os.path.join(ICONDIR, key + ".png")
+    if not os.path.exists(icon):
+        icon = "applications-internet"
+    label = f'{esc(title)}  <span alpha="55%">{esc(host)}</span>'
+    meta = " ".join([key, aliases, host])
+    out.write(f"{label}\0icon\x1f{icon}\x1fmeta\x1f{esc(meta)}\x1finfo\x1fURL:{home}\n")
+
+# ---------------- apps (unchanged behaviour) ----------------
+seen = set()
+rows = []
+dirs = [
+    os.path.expanduser("~/.local/share/applications"),
+    "/usr/share/applications",
+    "/usr/local/share/applications",
+    "/var/lib/snapd/desktop/applications",
+]
+for d in dirs:
+    for f in sorted(glob.glob(d + "/*.desktop")):
+        cp = configparser.RawConfigParser(strict=False, interpolation=None)
+        try:
+            cp.read(f, encoding="utf-8")
+            e = cp["Desktop Entry"]
+        except Exception:
+            continue
+        if e.get("NoDisplay", "").lower() == "true": continue
+        if e.get("Hidden", "").lower() == "true": continue
+        if e.get("Type", "Application") != "Application": continue
+        name = e.get("Name")
+        if not name or name in seen: continue
+        seen.add(name)
+        icon = e.get("Icon", "application-x-executable")
+        did = os.path.basename(f)
+        rows.append((name.lower(), f"{esc(name)}\0icon\x1f{icon}\x1finfo\x1f{did}"))
+for _, row in sorted(rows):
+    out.write(row + "\n")
+
+# ---------------- files from the index ----------------
+ICON = {
+    "png": "image-x-generic", "jpg": "image-x-generic", "jpeg": "image-x-generic",
+    "gif": "image-x-generic", "svg": "image-x-generic", "webp": "image-x-generic",
+    "pdf": "application-pdf",
+    "mp4": "video-x-generic", "mkv": "video-x-generic", "webm": "video-x-generic",
+    "mp3": "audio-x-generic", "flac": "audio-x-generic", "wav": "audio-x-generic",
+    "zip": "package-x-generic", "gz": "package-x-generic", "xz": "package-x-generic",
+    "py": "text-x-script", "sh": "text-x-script", "js": "text-x-script",
+    "ts": "text-x-script", "c": "text-x-script", "cpp": "text-x-script",
+    "md": "text-x-generic", "txt": "text-x-generic",
+}
+home = os.path.expanduser("~")
+try:
+    with open(sys.argv[1], errors="replace") as fh:
+        for line in fh:
+            line = line.rstrip("\n")
+            if len(line) < 3: continue
+            typ, path = line[0], line[2:]
+            clean = path.rstrip("/") or path
+            name = os.path.basename(clean)
+            parent = os.path.dirname(clean).replace(home, "~", 1)
+            if typ == "d":
+                icon = "folder"
+            else:
+                icon = ICON.get(name.rsplit(".", 1)[-1].lower(), "text-x-generic")
+            label = (f'{esc(name)}  <span alpha="55%">{esc(parent)}</span>')
+            out.write(f"{label}\0icon\x1f{icon}\x1finfo\x1fFILE:{path}\n")
+except FileNotFoundError:
+    pass
+
+# ---------------- frecency: often + recently opened rows go first ----------
+# score = sum over launches of 0.5 ** (age_days / 7)  (one-week half-life).
+# rofi has sort:false, so this order survives filtering as you type.
+import time, re
+now = time.time()
+score = {}
+try:
+    with open(os.path.expanduser("~/.cache/spotlight-usage"), errors="replace") as fh:
+        for line in fh:
+            ts, _, info = line.rstrip("\n").partition("\t")
+            try: age = (now - float(ts)) / 86400
+            except ValueError: continue
+            if age < 180:
+                score[info] = score.get(info, 0) + 0.5 ** (age / 7)
+except FileNotFoundError:
+    pass
+info_re = re.compile("\x1finfo\x1f([^\x1f\n]*)")
+def key(row):
+    m = info_re.search(row)
+    return score.get(m.group(1), 0) if m else 0
+hot = sorted((r for r in out if key(r) > 0), key=key, reverse=True)
+hotset = set(map(id, hot))
+sys.stdout.write("".join(hot) + "".join(r for r in out if id(r) not in hotset))
+PYEOF

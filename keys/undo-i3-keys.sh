@@ -6,8 +6,8 @@ WM=org.gnome.desktop.wm.keybindings; SH=org.gnome.shell.keybindings; MK=org.gnom
 gsettings reset org.gnome.mutter dynamic-workspaces
 for i in 1 2 3 4 5 6 7 8 9; do gsettings reset $SH switch-to-application-$i; done
 for i in $(seq 1 10); do gsettings reset $WM switch-to-workspace-$i; gsettings reset $WM move-to-workspace-$i; done
-gsettings reset org.gnome.shell.extensions.dash-to-dock hot-keys
-gsettings reset org.gnome.shell.extensions.dash-to-dock shortcut
+gsettings reset org.gnome.shell.extensions.dash-to-dock hot-keys 2>/dev/null || true
+gsettings reset org.gnome.shell.extensions.dash-to-dock shortcut 2>/dev/null || true
 for k in show-screenshot-ui screenshot focus-active-notification toggle-overview toggle-message-tray; do gsettings reset $SH $k; done
 for k in show-desktop switch-applications-backward minimize close toggle-fullscreen begin-resize \
          move-to-monitor-left move-to-monitor-down move-to-monitor-up move-to-monitor-right; do gsettings reset $WM $k; done

@@ -1,0 +1,16 @@
+#!/bin/sh
+# Now Playing label for the top bar (click = play/pause)
+P="$P"
+[ -x "$P" ] || P=playerctl
+status=$("$P" status 2>/dev/null)
+case "$status" in
+  Playing) icon="󰐊" ;;
+  Paused)  icon="󰏤" ;;
+  *) exit 0 ;;
+esac
+meta=$("$P" metadata --format '{{artist}} - {{title}}' 2>/dev/null)
+[ -z "$meta" ] || [ "$meta" = " - " ] && meta=$("$P" metadata --format '{{title}}' 2>/dev/null)
+[ -z "$meta" ] && exit 0
+# truncate
+meta=$(printf '%s' "$meta" | cut -c1-38)
+printf '%%{T3}%s%%{T-} %s\n' "$icon" "$meta"

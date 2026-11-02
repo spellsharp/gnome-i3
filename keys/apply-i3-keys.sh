@@ -13,8 +13,8 @@ B="$HOME/.local/bin"
 
 # --- Free keys that GNOME / Ubuntu Dock hold ----------------------------
 for i in 1 2 3 4 5 6 7 8 9; do gsettings set $SH switch-to-application-$i "[]"; done
-gsettings set org.gnome.shell.extensions.dash-to-dock hot-keys false
-gsettings set org.gnome.shell.extensions.dash-to-dock shortcut "[]"          # Super+q
+gsettings set org.gnome.shell.extensions.dash-to-dock hot-keys false 2>/dev/null || true
+gsettings set org.gnome.shell.extensions.dash-to-dock shortcut "[]" 2>/dev/null || true          # Super+q
 gsettings set $SH show-screenshot-ui "[]"                                     # Print
 gsettings set $SH screenshot "[]"                                             # Shift+Print
 gsettings set $SH focus-active-notification "[]"                              # Super+n
@@ -55,7 +55,7 @@ add() {  # name, binding, command
   paths="$paths, '$k'"
   n=$((n+1))
 }
-add "Lock"                  "<Super>x"             "$HOME/.config/scripts/lock-v4"
+add "Lock"                  "<Super>x"             "$HOME/.local/bin/gnome-i3-lock"
 add "Terminal"              "<Super>Return"        "gnome-terminal"
 add "Spotlight"             "<Super>d"             "$B/spotlight"
 add "Rofi spotlight"        "<Super><Control>d"    "rofi -show spotlight -modi spotlight:$B/rofi-spotlight -theme $HOME/.config/rofi/macspotlight.rasi"

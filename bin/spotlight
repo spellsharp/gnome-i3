@@ -1,0 +1,665 @@
+#!/usr/bin/python3
+"""macOS-style Spotlight launcher for i3 (GTK3).
+
+What rofi could not do, and why this exists:
+  * results re-rank on every keystroke,
+  * "youtube " collapses into a YouTube chip inside the search bar,
+  * the row you are about to trigger is always visible -- the web search,
+    the calculator result, the site being opened.
+
+Data comes from the same places the rofi launcher used:
+  ~/.cache/spotlight-index    file/folder index (rofi-spotlight --reindex)
+  ~/.cache/spotlight-icons    per-site favicons (spotlight-icons)
+  spotlight-route             query -> URL, and --list for the site catalogue
+
+Run with SPOTLIGHT_STAY=1 to keep the window open when it loses focus
+(useful when driving it from a script or taking screenshots).
+"""
+
+import configparser
+import glob
+import os
+import re
+import shutil
+import subprocess
+import sys
+import threading
+
+import gi
+
+gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
+from gi.repository import Gdk, GdkPixbuf, GLib, Gtk, Pango  # noqa: E402
+
+HOME = os.path.expanduser("~")
+INDEX = os.path.join(HOME, ".cache/spotlight-index")
+ICONS = os.path.join(HOME, ".cache/spotlight-icons")
+APPDIRS = [
+    os.path.join(HOME, ".local/share/applications"),
+    "/usr/share/applications",
+    "/usr/local/share/applications",
+    "/var/lib/snapd/desktop/applications",
+]
+MAX_ROWS = 8
+ICON_PX = 30
+BROWSER = "brave"
+
+MATHY = re.compile(r"^[=0-9(.,+-]|^[a-z]+[a-z0-9]*\(")
+
+CSS = b"""
+#root {
+    background-color: rgba(23, 23, 26, 0.88);
+    border: none;
+    border-radius: 26px;
+}
+#bar { padding: 16px 22px; }
+/* sizes in pt to match ~/.config/rofi/macspotlight.rasi (rofi fonts are pt) */
+#glass {
+    color: #86868b;
+    font-family: "FiraCode Nerd Font Propo";
+    font-size: 15pt;
+}
+entry#query {
+    background: transparent;
+    border: none;
+    box-shadow: none;
+    padding: 0;
+    caret-color: #f5f5f7;
+    color: #f5f5f7;
+    font-family: "Inter Display", Inter, sans-serif;
+    font-size: 17pt;
+    font-weight: 300;
+}
+/* GTK3 hides an entry's own placeholder while it has focus, and this entry
+   always has focus -- so the hint is a separate label over it. */
+#hint {
+    color: #86868b;
+    font-family: "Inter Display", Inter, sans-serif;
+    font-size: 17pt;
+    font-weight: 300;
+}
+entry#query selection { background-color: #0a84ff; color: #ffffff; }
+#chip {
+    background-color: rgba(255, 255, 255, 0.12);
+    border-radius: 13px;
+    padding: 3px 10px 3px 6px;
+    margin-right: 8px;
+}
+#chip label {
+    color: #f5f5f7;
+    font-family: "Inter Display", Inter, sans-serif;
+    font-size: 13px;
+    font-weight: 500;
+}
+#results {
+    background: transparent;
+    border-top: 1px solid rgba(255, 255, 255, 0.11);
+    padding: 8px;
+}
+list, list row { background: transparent; }
+list row { border-radius: 9px; padding: 8px 12px; }
+list row:selected { background-color: #0a84ff; }
+#title {
+    color: #f5f5f7;
+    font-family: "Inter Display", Inter, sans-serif;
+    font-size: 11pt;
+    font-weight: 500;
+}
+#subtitle {
+    color: rgba(245, 245, 247, 0.5);
+    font-family: "Inter Display", Inter, sans-serif;
+    font-size: 11pt;
+    font-weight: 500;
+}
+list row:selected #title, list row:selected #subtitle { color: #ffffff; }
+list row:selected #subtitle { color: rgba(255, 255, 255, 0.65); }
+"""
+
+
+# --------------------------------------------------------------------------
+# data
+# --------------------------------------------------------------------------
+
+class Item:
+    """One candidate row. kind drives both the icon and what Enter does."""
+
+    __slots__ = ("kind", "title", "subtitle", "icon", "target", "score", "haystack")
+
+    def __init__(self, kind, title, subtitle, icon, target, haystack=None):
+        self.kind = kind            # site | app | file | web | calc | url
+        self.title = title
+        self.subtitle = subtitle
+        self.icon = icon            # icon name or absolute path
+        self.target = target        # desktop id, path, url or text
+        self.score = 0
+        self.haystack = (haystack or title).lower()
+
+
+def load_sites():
+    items, keys = [], {}
+    try:
+        out = subprocess.run(["spotlight-route", "--list"], capture_output=True,
+                             text=True, timeout=5, stdin=subprocess.DEVNULL).stdout
+    except Exception:
+        return items, keys
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 4:
+            continue
+        key, title, home, host = parts[:4]
+        aliases = parts[4].split() if len(parts) > 4 else []
+        icon = os.path.join(ICONS, key + ".png")
+        if not os.path.exists(icon):
+            icon = "applications-internet"
+        hay = " ".join([title, key, host] + aliases)
+        items.append(Item("site", title, host, icon, home, hay))
+        for name in [key] + aliases:
+            keys[name] = (title, icon, home)
+    return items, keys
+
+
+def load_apps():
+    items, seen = [], set()
+    for d in APPDIRS:
+        for path in sorted(glob.glob(d + "/*.desktop")):
+            cp = configparser.RawConfigParser(strict=False, interpolation=None)
+            try:
+                cp.read(path, encoding="utf-8")
+                e = cp["Desktop Entry"]
+            except Exception:
+                continue
+            if e.get("NoDisplay", "").lower() == "true":
+                continue
+            if e.get("Hidden", "").lower() == "true":
+                continue
+            if e.get("Type", "Application") != "Application":
+                continue
+            name = e.get("Name")
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            hay = " ".join(filter(None, [name, e.get("GenericName", ""),
+                                         e.get("Keywords", "")]))
+            items.append(Item("app", name, e.get("GenericName", "") or "Application",
+                              e.get("Icon", "application-x-executable"),
+                              os.path.basename(path), hay))
+    return items
+
+
+FILE_ICONS = {
+    "png": "image-x-generic", "jpg": "image-x-generic", "jpeg": "image-x-generic",
+    "gif": "image-x-generic", "svg": "image-x-generic", "webp": "image-x-generic",
+    "pdf": "application-pdf",
+    "mp4": "video-x-generic", "mkv": "video-x-generic", "webm": "video-x-generic",
+    "mp3": "audio-x-generic", "flac": "audio-x-generic", "wav": "audio-x-generic",
+    "zip": "package-x-generic", "gz": "package-x-generic", "xz": "package-x-generic",
+    "py": "text-x-script", "sh": "text-x-script", "js": "text-x-script",
+    "ts": "text-x-script", "c": "text-x-script", "cpp": "text-x-script",
+    "md": "text-x-generic", "txt": "text-x-generic",
+}
+
+
+def reindex_if_stale(max_age=60):
+    """Refresh the file index when it is older than max_age seconds. Under
+    i3 rofi-spotlight kept it fresh; nothing else does that under GNOME. A
+    reindex takes well under a second (fd), so it runs inline here."""
+    try:
+        import time
+        if time.time() - os.path.getmtime(INDEX) < max_age:
+            return
+    except OSError:
+        pass
+    try:
+        subprocess.run([os.path.join(HOME, ".local/bin/rofi-spotlight"), "--reindex"], timeout=10,
+                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+
+def load_files():
+    items = []
+    try:
+        fh = open(INDEX, errors="replace")
+    except OSError:
+        return items
+    with fh:
+        for line in fh:
+            line = line.rstrip("\n")
+            if len(line) < 3:
+                continue
+            typ, path = line[0], line[2:]
+            clean = path.rstrip("/") or path
+            name = os.path.basename(clean)
+            if not name:
+                continue
+            parent = os.path.dirname(clean).replace(HOME, "~", 1)
+            if typ == "d":
+                icon = "folder"
+            else:
+                icon = FILE_ICONS.get(name.rsplit(".", 1)[-1].lower(), "text-x-generic")
+            items.append(Item("file", name, parent, icon, clean, name))
+    return items
+
+
+def calc(expr):
+    """qalc first, python as the fallback. Never touches stdin -- a prompt
+    from qalc would hang the whole launcher."""
+    q = expr.lstrip("=").strip()
+    m = re.fullmatch(r"([0-9.]+)%\s+of\s+([0-9.]+)", q)
+    if m:
+        q = f"{m.group(2)}*{m.group(1)}/100"
+    if shutil.which("qalc"):
+        try:
+            r = subprocess.run(["qalc", "-t", "--", q], capture_output=True, text=True,
+                               timeout=3, stdin=subprocess.DEVNULL)
+            out = r.stdout.strip()
+            if out and out != q and not out.lower().startswith("error"):
+                return out
+        except Exception:
+            pass
+    try:
+        import ast
+        import math
+        import operator
+        ops = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
+               ast.Div: operator.truediv, ast.Pow: operator.pow,
+               ast.Mod: operator.mod, ast.USub: operator.neg,
+               ast.FloorDiv: operator.floordiv}
+        names = {k: v for k, v in vars(math).items() if not k.startswith("_")}
+
+        def ev(n):
+            if isinstance(n, ast.Expression):
+                return ev(n.body)
+            if isinstance(n, ast.Constant) and isinstance(n.value, (int, float)):
+                return n.value
+            if isinstance(n, ast.BinOp):
+                return ops[type(n.op)](ev(n.left), ev(n.right))
+            if isinstance(n, ast.UnaryOp):
+                return ops[type(n.op)](ev(n.operand))
+            if isinstance(n, ast.Name) and n.id in names:
+                return names[n.id]
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name):
+                return names[n.func.id](*[ev(a) for a in n.args])
+            raise ValueError
+        v = ev(ast.parse(q.replace("^", "**"), mode="eval"))
+        return f"{v:g}" if isinstance(v, float) else str(v)
+    except Exception:
+        return None
+
+
+def score_of(item, q):
+    """Prefix beats word-start beats substring; sites and apps outrank files."""
+    hay = item.haystack
+    pos = hay.find(q)
+    if pos < 0:
+        return -1
+    if hay.startswith(q):
+        s = 100
+    elif pos and hay[pos - 1] in " -_./":
+        s = 80
+    else:
+        s = 45
+    s += {"site": 30, "app": 25}.get(item.kind, 0)
+    return s - min(len(item.title), 40) / 40.0
+
+
+# --------------------------------------------------------------------------
+# ui
+# --------------------------------------------------------------------------
+
+class Spotlight(Gtk.Window):
+    def __init__(self):
+        super().__init__(type=Gtk.WindowType.TOPLEVEL)
+        self.set_decorated(False)
+        self.set_app_paintable(True)
+        self.set_resizable(False)
+        self.set_keep_above(True)
+        self.set_skip_taskbar_hint(True)
+        self.set_skip_pager_hint(True)
+        self.set_type_hint(Gdk.WindowTypeHint.DIALOG)
+        self.set_size_request(700, -1)
+        self.set_wmclass("spotlight", "Spotlight")
+
+        screen = self.get_screen()
+        visual = screen.get_rgba_visual()
+        if visual:
+            self.set_visual(visual)
+
+        provider = Gtk.CssProvider()
+        provider.load_from_data(CSS)
+        Gtk.StyleContext.add_provider_for_screen(
+            screen, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+        self.sites, self.site_keys = [], {}
+        self.apps, self.files = [], []
+        self.rows = []
+        self.chip_key = None
+
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        root.set_name("root")
+        self.add(root)
+
+        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=14)
+        bar.set_name("bar")
+        glass = Gtk.Label(label="\uf002")  # nerd-font magnifier, as in rofi
+        glass.set_name("glass")
+        bar.pack_start(glass, False, False, 0)
+
+        self.chip = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self.chip.set_name("chip")
+        self.chip_icon = Gtk.Image()
+        self.chip_label = Gtk.Label()
+        self.chip.pack_start(self.chip_icon, False, False, 0)
+        self.chip.pack_start(self.chip_label, False, False, 0)
+        bar.pack_start(self.chip, False, False, 0)
+        # NOT set_no_show_all: that also makes show_all() a no-op ON the chip
+        # itself, so its icon and label never get realised and the chip draws
+        # as an empty grey pill. It is hidden after the window's show_all().
+
+        self.entry = Gtk.Entry()
+        self.entry.set_name("query")
+        self.entry.set_has_frame(False)
+        self.entry.connect("changed", self.on_changed)
+        self.entry.connect("activate", self.on_activate)
+        overlay = Gtk.Overlay()
+        overlay.add(self.entry)
+        self.hint = Gtk.Label(label="Spotlight Search", xalign=0)
+        self.hint.set_name("hint")
+        self.hint.set_halign(Gtk.Align.START)
+        overlay.add_overlay(self.hint)
+        overlay.set_overlay_pass_through(self.hint, True)
+        bar.pack_start(overlay, True, True, 0)
+        root.pack_start(bar, False, False, 0)
+
+        self.list = Gtk.ListBox()
+        self.list.set_selection_mode(Gtk.SelectionMode.BROWSE)
+        self.list.set_activate_on_single_click(True)
+        self.list.connect("row-activated", lambda *_: self.on_activate())
+        self.scroll = Gtk.ScrolledWindow()
+        self.scroll.set_name("results")
+        self.scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        self.scroll.set_max_content_height(MAX_ROWS * 46)
+        self.scroll.set_propagate_natural_height(True)
+        self.scroll.add(self.list)
+        self.scroll.set_no_show_all(True)
+        root.pack_start(self.scroll, True, True, 0)
+
+        self.connect("key-press-event", self.on_key)
+        self.connect("focus-out-event", self.on_focus_out)
+        self.connect("destroy", Gtk.main_quit)
+        threading.Thread(target=self.load_data, daemon=True).start()
+
+    # ---- data ----------------------------------------------------------
+    def load_data(self):
+        sites, keys = load_sites()
+        apps = load_apps()
+        reindex_if_stale()
+        files = load_files()
+
+        def apply():
+            self.sites, self.site_keys, self.apps, self.files = sites, keys, apps, files
+            if self.entry.get_text():
+                self.refresh()
+            return False
+        GLib.idle_add(apply)
+
+    # ---- geometry ------------------------------------------------------
+    def place(self):
+        display = Gdk.Display.get_default()
+        seat = display.get_default_seat()
+        pointer = seat.get_pointer()
+        screen, px, py = pointer.get_position()
+        monitor = display.get_monitor_at_point(px, py)
+        geo = monitor.get_geometry()
+        width, _ = self.get_size()
+        self.move(geo.x + (geo.width - width) // 2, geo.y + int(geo.height * 0.17))
+
+    # ---- chip ----------------------------------------------------------
+    def set_chip(self, key):
+        title, icon, _home = self.site_keys[key]
+        self.chip_key = key
+        self.chip_label.set_text(title)
+        self.chip_icon.set_from_pixbuf(load_pixbuf(icon, 18))
+        self.chip.show_all()
+        self.sync_hint()
+
+    def clear_chip(self):
+        self.chip_key = None
+        self.chip.hide()
+        self.sync_hint()
+
+    def sync_hint(self):
+        self.hint.set_visible(not self.chip_key and not self.entry.get_text())
+
+    # ---- query ---------------------------------------------------------
+    def on_changed(self, *_):
+        text = self.entry.get_text()
+        # "youtube " -> the word becomes a chip and leaves the entry
+        if not self.chip_key and text.endswith(" "):
+            key = text.strip().lower()
+            if key in self.site_keys:
+                self.entry.set_text("")
+                self.set_chip(key)
+                return
+        self.refresh()
+
+    def query(self):
+        return self.entry.get_text().strip()
+
+    def refresh(self):
+        self.sync_hint()
+        for child in self.list.get_children():
+            self.list.remove(child)
+        self.rows = []
+        q = self.query()
+        items = self.build(q)
+        for item in items:
+            self.list.add(make_row(item))
+            self.rows.append(item)
+        self.list.show_all()
+        visible = bool(items)
+        self.scroll.set_visible(visible)
+        self.resize(700, 1)
+        if visible:
+            first = self.list.get_row_at_index(0)
+            if first:
+                self.list.select_row(first)
+
+    def build(self, q):
+        """Rows for the current query: actions first, then matches, web last."""
+        if self.chip_key:
+            title, icon, home = self.site_keys[self.chip_key]
+            if not q:
+                return [Item("url", f"Open {title}", home, icon, home)]
+            url = route(f"{self.chip_key} {q}")
+            return [Item("url", f"Search {title} for “{q}”", url, icon, url)]
+        if not q:
+            return []
+
+        rows = []
+        if MATHY.match(q) or (" to " in q and any(c.isdigit() for c in q)):
+            result = calc(q)
+            if result:
+                rows.append(Item("calc", f"= {result}", "copy to clipboard",
+                                 "accessories-calculator", result))
+
+        first = q.split()[0].lower()
+        rest = q[len(first):].strip()
+        if first in self.site_keys and rest:
+            title, icon, _home = self.site_keys[first]
+            url = route(q)
+            rows.append(Item("url", f"Search {title} for “{rest}”", url, icon, url))
+
+        if re.fullmatch(r"(https?://\S+|[\w-]+(\.[\w-]+)+(/\S*)?)", q):
+            url = q if q.startswith("http") else "https://" + q
+            rows.append(Item("url", q, "open in Brave", "applications-internet", url))
+
+        needle = q.lower()
+        matches = []
+        for pool in (self.sites, self.apps, self.files):
+            for item in pool:
+                s = score_of(item, needle)
+                if s > 0:
+                    item.score = s
+                    matches.append(item)
+        matches.sort(key=lambda i: -i.score)
+        rows.extend(matches[:max(0, MAX_ROWS - len(rows) - 1)])
+
+        rows.append(Item("web", f"Search the web for “{q}”", "Brave",
+                         brave_icon(), route(q)))
+        return rows
+
+    # ---- actions -------------------------------------------------------
+    def on_activate(self, *_):
+        row = self.list.get_selected_row()
+        if not self.rows:
+            return
+        item = self.rows[row.get_index() if row else 0]
+        run(item)
+        Gtk.main_quit()
+
+    def on_key(self, _widget, event):
+        key = event.keyval
+        if key == Gdk.KEY_Escape:
+            Gtk.main_quit()
+            return True
+        if key == Gdk.KEY_BackSpace and self.chip_key and not self.entry.get_text():
+            self.clear_chip()
+            self.refresh()
+            return True
+        if key == Gdk.KEY_BackSpace and not self.entry.get_text():
+            Gtk.main_quit()
+            return True
+        if key in (Gdk.KEY_Down, Gdk.KEY_Up):
+            rows = self.list.get_children()
+            if not rows:
+                return True
+            cur = self.list.get_selected_row()
+            i = cur.get_index() if cur else 0
+            i = (i + (1 if key == Gdk.KEY_Down else -1)) % len(rows)
+            self.list.select_row(self.list.get_row_at_index(i))
+            return True
+        return False
+
+    def on_focus_out(self, *_):
+        if not os.environ.get("SPOTLIGHT_STAY"):
+            Gtk.main_quit()
+        return False
+
+
+def route(q):
+    try:
+        out = subprocess.run(["spotlight-route", q], capture_output=True, text=True,
+                             timeout=5, stdin=subprocess.DEVNULL).stdout.strip()
+        if out:
+            return out
+    except Exception:
+        pass
+    from urllib.parse import quote
+    return "https://www.google.com/search?q=" + quote(q, safe="")
+
+
+def brave_icon():
+    for name in ("brave-browser", "brave", "brave-desktop"):
+        if Gtk.IconTheme.get_default().has_icon(name):
+            return name
+    return "web-browser"
+
+
+_pixbuf_cache = {}
+
+
+def load_pixbuf(icon, size=ICON_PX):
+    key = (icon, size)
+    if key in _pixbuf_cache:
+        return _pixbuf_cache[key]
+    pb = None
+    try:
+        if icon and os.path.isabs(icon) and os.path.exists(icon):
+            pb = GdkPixbuf.Pixbuf.new_from_file_at_size(icon, size, size)
+        else:
+            theme = Gtk.IconTheme.get_default()
+            pb = theme.load_icon(icon, size, Gtk.IconLookupFlags.FORCE_SIZE)
+    except Exception:
+        try:
+            pb = Gtk.IconTheme.get_default().load_icon(
+                "application-x-executable", size, Gtk.IconLookupFlags.FORCE_SIZE)
+        except Exception:
+            pb = None
+    _pixbuf_cache[key] = pb
+    return pb
+
+
+def make_row(item):
+    row = Gtk.ListBoxRow()
+    box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+    image = Gtk.Image()
+    pb = load_pixbuf(item.icon)
+    if pb:
+        image.set_from_pixbuf(pb)
+    box.pack_start(image, False, False, 0)
+
+    title = Gtk.Label(label=item.title, xalign=0)
+    title.set_name("title")
+    title.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+    box.pack_start(title, False, False, 0)
+
+    if item.subtitle:
+        sub = Gtk.Label(label=item.subtitle, xalign=0)
+        sub.set_name("subtitle")
+        sub.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+        box.pack_start(sub, False, False, 0)
+
+    row.add(box)
+    return row
+
+
+def run(item):
+    if item.kind == "app":
+        subprocess.Popen(["gtk-launch", item.target], start_new_session=True,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    elif item.kind == "file":
+        subprocess.Popen(["xdg-open", item.target], start_new_session=True,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    elif item.kind == "calc":
+        # xclip stays resident to serve the selection: detach it completely or
+        # it keeps this process's pipes open
+        p = subprocess.Popen(["xclip", "-selection", "clipboard"],
+                             stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, start_new_session=True)
+        p.stdin.write(item.target.encode())
+        p.stdin.close()
+        subprocess.Popen(["notify-send", "-a", "Spotlight", f"= {item.target}",
+                          "copied to clipboard", "-i", "accessories-calculator"],
+                         start_new_session=True, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL)
+    else:  # site | url | web
+        subprocess.Popen([BROWSER, item.target], start_new_session=True,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def main():
+    win = Spotlight()
+    win.show_all()
+    win.chip.hide()
+    win.place()
+    win.present_with_time(Gdk.CURRENT_TIME)
+    GLib.timeout_add(60, lambda: (grab_keyboard(win), False)[1])
+    # top up the favicon cache for any site added since the last run
+    subprocess.Popen(["spotlight-icons"], start_new_session=True,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    Gtk.main()
+
+
+def grab_keyboard(win):
+    try:
+        seat = Gdk.Display.get_default().get_default_seat()
+        seat.grab(win.get_window(), Gdk.SeatCapabilities.KEYBOARD, True,
+                  None, None, None, None)
+    except Exception:
+        pass
+
+
+if __name__ == "__main__":
+    sys.exit(main())

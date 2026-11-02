@@ -1,0 +1,7 @@
+#!/bin/sh
+# GNOME twin of dunst toggle-dnd.sh: flip notification banners on/off.
+if [ "$(gsettings get org.gnome.desktop.notifications show-banners)" = true ]; then
+    gsettings set org.gnome.desktop.notifications show-banners false
+else
+    gsettings set org.gnome.desktop.notifications show-banners true
+fi

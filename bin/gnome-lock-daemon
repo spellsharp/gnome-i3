@@ -1,0 +1,5 @@
+#!/bin/sh
+# GNOME on LightDM has no working lock screen (ScreenShield needs GDM).
+# Same locker as i3: idle lock at 20 min after a 30 s dim, and lock before sleep.
+xset s 1170 30
+exec xss-lock --transfer-sleep-lock --notifier="$HOME/.local/bin/predim" -- "$HOME/.local/bin/gnome-i3-lock"
