@@ -22,6 +22,9 @@ Gio._promisify(Gio.Subprocess.prototype, 'communicate_utf8_async');
 
 const BIN = `${GLib.get_home_dir()}/.local/bin`;
 
+// Quick Settings indicators that show only while something is in use.
+const PRIVACY = ['_remoteAccess', '_camera', '_volumeInput', '_location'];
+
 // A helper from ~/.local/bin when it is there, else the bare name (PATH).
 function prog(name) {
     const p = `${BIN}/${name}`;
@@ -539,9 +542,12 @@ export default class I3Extras extends Extension {
 
         // Main bar: the same gear as the secondary bars, in place of the
         // wifi / bluetooth / sound / battery icons. GNOME's panel button
-        // draws only its first child, so the gear goes first and the
+        // draws only its first child, so the gear box goes first and the
         // indicators box is hidden; the menu still opens from this button.
+        // The privacy icons (screen sharing, camera, microphone, location
+        // in use) move into the gear box, so they still show when active.
         const qsBtn = Main.panel.statusArea.quickSettings;
+        this._moved = [];
         if (qsBtn?._indicators) {
             this._gear = new St.BoxLayout({style_class: 'panel-status-indicators-box'});
             this._gear.add_child(new St.Icon({
@@ -550,6 +556,23 @@ export default class I3Extras extends Extension {
             }));
             qsBtn.insert_child_at_index(this._gear, 0);
             qsBtn._indicators.hide();
+            // GNOME creates the indicators asynchronously at startup.
+            let tries = 0;
+            const take = () => {
+                if (!qsBtn._camera && ++tries < 25)
+                    return GLib.SOURCE_CONTINUE;
+                this._takeId = 0;
+                for (const ind of PRIVACY.map(k => qsBtn[k])) {
+                    if (!ind || ind.get_parent() !== qsBtn._indicators)
+                        continue;
+                    qsBtn._indicators.remove_child(ind);
+                    this._gear.insert_child_at_index(ind, this._moved.length);
+                    this._moved.push(ind);
+                }
+                return GLib.SOURCE_REMOVE;
+            };
+            if (take() === GLib.SOURCE_CONTINUE)
+                this._takeId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 200, take);
         }
 
         // A bar on every other monitor; rebuilt when monitors change.
@@ -596,10 +619,20 @@ export default class I3Extras extends Extension {
             this._dateHome.add_child(this._dateBox);
         }
         this._dateBox = this._dateHome = null;
+        if (this._takeId) {
+            GLib.source_remove(this._takeId);
+            this._takeId = 0;
+        }
         if (this._gear) {
+            const box = Main.panel.statusArea.quickSettings?._indicators;
+            this._moved.forEach((ind, i) => {
+                this._gear.remove_child(ind);
+                box?.insert_child_at_index(ind, i);
+            });
+            this._moved = null;
             this._gear.destroy();
             this._gear = null;
-            Main.panel.statusArea.quickSettings?._indicators?.show();
+            box?.show();
         }
         this._activities?.show();
         this._activities = null;
